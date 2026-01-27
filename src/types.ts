@@ -43,6 +43,22 @@ export interface NetworkError extends Error {
   status?: number;
 }
 
+export class NetworkErrorImpl extends Error implements NetworkError {
+  code?: string;
+  status?: number;
+  
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = 'NetworkError';
+    if (status !== undefined) {
+      this.status = status;
+    }
+    if (code !== undefined) {
+      this.code = code;
+    }
+  }
+}
+
 export interface SummarizerError extends Error {
   reason?: 'unavailable' | 'model_download' | 'processing_failed';
 }
