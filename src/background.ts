@@ -11,6 +11,7 @@ import {
   NetworkError,
   NetworkErrorImpl,
   SummarizerError,
+  CacheEntry,
 } from './types';
 
 declare global {
@@ -31,6 +32,9 @@ declare global {
 
 let summarizerInstance: AISummarizer | null = null;
 let summarizerInitializing = false;
+const summaryCache = new Map<string, CacheEntry>();
+const activeRequests = new Map<string, AbortController>();
+let activeRequestCount = 0;
 
 interface MessageHandler {
   [key: string]: (message: any, sender: chrome.runtime.MessageSender) => Promise<SummaryResponse>;
@@ -96,6 +100,78 @@ function isValidSummaryRequest(message: any): message is SummaryRequest {
     VALID_URL_PATTERN.test(message.url)
   );
 }
+function getCachedSummary(url: string): string | null {
+  const entry = summaryCache.get(url);
+
+  if (!entry) {
+    return null;
+  }
+
+  const age = Date.now() - entry.timestamp;
+
+  if (age > TIMING_CONSTANTS.CACHE_EXPIRATION) {
+    summaryCache.delete(url);
+    return null;
+  }
+
+  return entry.summary;
+}
+
+function setCachedSummary(url: string, summary: string): void {
+  summaryCache.set(url, {
+    summary,
+    timestamp: Date.now(),
+    url,
+  });
+
+  cleanupCache();
+}
+
+function cleanupCache(): void {
+  const memoryUsage = estimateCacheMemoryUsage();
+
+  if (memoryUsage <= PERFORMANCE_LIMITS.MAX_MEMORY_USAGE) {
+    return;
+  }
+
+  const entries = Array.from(summaryCache.entries())
+    .map(([url, entry]) => ({ url, entry }))
+    .sort((a, b) => a.entry.timestamp - b.entry.timestamp);
+
+  let currentMemory = memoryUsage;
+
+  for (const { url } of entries) {
+    if (currentMemory <= PERFORMANCE_LIMITS.MAX_MEMORY_USAGE) {
+      break;
+    }
+
+    const entry = summaryCache.get(url);
+    if (entry) {
+      const entrySize = estimateEntrySize(entry);
+      summaryCache.delete(url);
+      currentMemory -= entrySize;
+    }
+  }
+}
+
+function estimateCacheMemoryUsage(): number {
+  let totalSize = 0;
+
+  for (const entry of summaryCache.values()) {
+    totalSize += estimateEntrySize(entry);
+  }
+
+  return totalSize;
+}
+
+function estimateEntrySize(entry: CacheEntry): number {
+  return (
+    entry.url.length * 2 +
+    entry.summary.length * 2 +
+    8 +
+    100
+  );
+}
 
 async function handleSummarizeUrl(
   message: any,
@@ -108,17 +184,49 @@ async function handleSummarizeUrl(
       cached: false,
     };
   }
-  
+
+  const cachedSummary = getCachedSummary(message.url);
+  if (cachedSummary) {
+    return {
+      success: true,
+      summary: cachedSummary,
+      cached: true,
+    };
+  }
+
+  if (activeRequestCount >= PERFORMANCE_LIMITS.MAX_CONCURRENT_REQUESTS) {
+    return {
+      success: false,
+      error: ERROR_MESSAGES.TEMPORARY_ERROR,
+      cached: false,
+    };
+  }
+
+  const requestId = `${message.url}-${message.timestamp}`;
+  const controller = new AbortController();
+  activeRequests.set(requestId, controller);
+  activeRequestCount++;
+
   try {
-    const content = await fetchPageContent(message.url);
+    const content = await fetchPageContent(message.url, controller.signal);
     const summary = await summarizeContent(content, message.url);
-    
+
+    setCachedSummary(message.url, summary);
+
     return {
       success: true,
       summary,
       cached: false,
     };
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return {
+        success: false,
+        error: ERROR_MESSAGES.TEMPORARY_ERROR,
+        cached: false,
+      };
+    }
+
     if (error instanceof NetworkErrorImpl) {
       return {
         success: false,
@@ -126,7 +234,7 @@ async function handleSummarizeUrl(
         cached: false,
       };
     }
-    
+
     if (isSummarizerError(error)) {
       return {
         success: false,
@@ -134,19 +242,34 @@ async function handleSummarizeUrl(
         cached: false,
       };
     }
-    
+
     return {
       success: false,
       error: ERROR_MESSAGES.TEMPORARY_ERROR,
       cached: false,
     };
+  } finally {
+    activeRequests.delete(requestId);
+    activeRequestCount--;
   }
 }
 
 async function handleCancelRequest(
-  _message: any,
+  message: any,
   _sender: chrome.runtime.MessageSender
 ): Promise<SummaryResponse> {
+  if (message.url && message.timestamp) {
+    const requestId = `${message.url}-${message.timestamp}`;
+    const controller = activeRequests.get(requestId);
+    if (controller) {
+      controller.abort();
+      activeRequests.delete(requestId);
+      activeRequestCount--;
+    }
+  } else {
+    cancelAllRequests();
+  }
+  
   return {
     success: true,
     cached: false,
@@ -157,17 +280,40 @@ async function handleClearCache(
   _message: any,
   _sender: chrome.runtime.MessageSender
 ): Promise<SummaryResponse> {
+  summaryCache.clear();
+  cancelAllRequests();
   return {
     success: true,
     cached: false,
   };
 }
 
+function cancelAllRequests(): void {
+  for (const controller of activeRequests.values()) {
+    controller.abort();
+  }
+  activeRequests.clear();
+  activeRequestCount = 0;
+}
+
+chrome.runtime.onSuspend.addListener(() => {
+  cancelAllRequests();
+  summaryCache.clear();
+  if (summarizerInstance) {
+    summarizerInstance.destroy();
+    summarizerInstance = null;
+  }
+});
+
 export {};
 
-async function fetchPageContent(url: string): Promise<string> {
+async function fetchPageContent(url: string, signal?: AbortSignal): Promise<string> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMING_CONSTANTS.CONTENT_FETCH_TIMEOUT);
+
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort());
+  }
 
   try {
     const response = await fetch(url, {
