@@ -7,11 +7,30 @@ import {
   VALID_URL_PATTERN,
   TIMING_CONSTANTS,
   PERFORMANCE_LIMITS,
+  SUMMARIZER_CONFIG,
   NetworkError,
   NetworkErrorImpl,
+  SummarizerError,
 } from './types';
 
-console.log('Clickbait Ninja service worker initialized');
+declare global {
+  interface Window {
+    ai?: {
+      summarizer?: {
+        capabilities(): Promise<{ available: string }>;
+        create(config: typeof SUMMARIZER_CONFIG): Promise<AISummarizer>;
+      };
+    };
+  }
+  
+  interface AISummarizer {
+    summarize(text: string): Promise<string>;
+    destroy(): void;
+  }
+}
+
+let summarizerInstance: AISummarizer | null = null;
+let summarizerInitializing = false;
 
 interface MessageHandler {
   [key: string]: (message: any, sender: chrome.runtime.MessageSender) => Promise<SummaryResponse>;
@@ -49,8 +68,7 @@ chrome.runtime.onMessage.addListener((
 
   handler(message, sender)
     .then(response => sendResponse(response))
-    .catch(error => {
-      console.error('Message handler error:', error);
+    .catch(() => {
       sendResponse({
         success: false,
         error: ERROR_MESSAGES.TEMPORARY_ERROR,
@@ -90,24 +108,29 @@ async function handleSummarizeUrl(
       cached: false,
     };
   }
-
-  console.log('Processing summary request for:', message.url);
   
   try {
     const content = await fetchPageContent(message.url);
+    const summary = await summarizeContent(content, message.url);
     
     return {
       success: true,
-      summary: `Content fetched successfully (${content.length} characters)`,
+      summary,
       cached: false,
     };
   } catch (error) {
-    console.error('Content fetch error:', error);
-    
     if (error instanceof NetworkErrorImpl) {
       return {
         success: false,
         error: getNetworkErrorMessage(error),
+        cached: false,
+      };
+    }
+    
+    if (isSummarizerError(error)) {
+      return {
+        success: false,
+        error: getSummarizerErrorMessage(error),
         cached: false,
       };
     }
@@ -124,8 +147,6 @@ async function handleCancelRequest(
   _message: any,
   _sender: chrome.runtime.MessageSender
 ): Promise<SummaryResponse> {
-  console.log('Processing cancel request');
-  
   return {
     success: true,
     cached: false,
@@ -136,8 +157,6 @@ async function handleClearCache(
   _message: any,
   _sender: chrome.runtime.MessageSender
 ): Promise<SummaryResponse> {
-  console.log('Processing clear cache request');
-  
   return {
     success: true,
     cached: false,
@@ -254,5 +273,131 @@ function getNetworkErrorMessage(error: NetworkError): string {
       return ERROR_MESSAGES.CONTENT_UNAVAILABLE;
     default:
       return ERROR_MESSAGES.CONTENT_UNAVAILABLE;
+  }
+}
+
+async function initializeSummarizer(): Promise<AISummarizer> {
+  if (summarizerInstance) {
+    return summarizerInstance;
+  }
+
+  if (summarizerInitializing) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return initializeSummarizer();
+  }
+
+  summarizerInitializing = true;
+
+  try {
+    const ai = (self as any).ai;
+    
+    if (!ai?.summarizer) {
+      throw createSummarizerError('unavailable', 'Summarizer API not available');
+    }
+
+    const capabilities = await ai.summarizer.capabilities();
+    
+    if (capabilities.available === 'no') {
+      throw createSummarizerError('unavailable', 'Summarizer not available');
+    }
+
+    const instance = await ai.summarizer.create(SUMMARIZER_CONFIG);
+    summarizerInstance = instance;
+    
+    return instance;
+  } finally {
+    summarizerInitializing = false;
+  }
+}
+
+async function summarizeContent(content: string, _url: string): Promise<string> {
+  const cleanedContent = extractTextContent(content);
+  
+  if (!cleanedContent.trim()) {
+    throw createSummarizerError('processing_failed', 'No text content found');
+  }
+
+  const sentenceCount = countSentences(cleanedContent);
+  
+  if (sentenceCount <= PERFORMANCE_LIMITS.MAX_SUMMARY_SENTENCES) {
+    return cleanedContent.trim();
+  }
+
+  try {
+    const summarizer = await initializeSummarizer();
+    const summary = await summarizer.summarize(cleanedContent);
+    
+    const limitedSummary = limitToSentences(summary, PERFORMANCE_LIMITS.MAX_SUMMARY_SENTENCES);
+    
+    return limitedSummary;
+  } catch (error) {
+    if (isSummarizerError(error)) {
+      throw error;
+    }
+    
+    return getFallbackSummary(cleanedContent);
+  }
+}
+
+function extractTextContent(html: string): string {
+  const tempDiv = new DOMParser().parseFromString(html, 'text/html');
+  
+  const scripts = tempDiv.querySelectorAll('script, style, noscript');
+  scripts.forEach(el => el.remove());
+  
+  const textContent = tempDiv.body?.textContent || tempDiv.textContent || '';
+  
+  return textContent.replace(/\s+/g, ' ').trim();
+}
+
+function countSentences(text: string): number {
+  const sentences = text.match(/[.!?]+/g);
+  return sentences ? sentences.length : 0;
+}
+
+function limitToSentences(text: string, maxSentences: number): string {
+  const sentencePattern = /[^.!?]+[.!?]+/g;
+  const sentences = text.match(sentencePattern);
+  
+  if (!sentences || sentences.length <= maxSentences) {
+    return text.trim();
+  }
+  
+  return sentences.slice(0, maxSentences).join(' ').trim();
+}
+
+function getFallbackSummary(content: string): string {
+  const sentences = content.match(/[^.!?]+[.!?]+/g);
+  
+  if (!sentences || sentences.length === 0) {
+    const words = content.split(/\s+/).slice(0, 50);
+    return words.join(' ') + '...';
+  }
+  
+  const firstSentences = sentences.slice(0, PERFORMANCE_LIMITS.MAX_SUMMARY_SENTENCES);
+  return firstSentences.join(' ').trim();
+}
+
+function createSummarizerError(reason: NonNullable<SummarizerError['reason']>, message: string): SummarizerError {
+  const error = new Error(message) as SummarizerError;
+  error.name = 'SummarizerError';
+  error.reason = reason;
+  return error;
+}
+
+function isSummarizerError(error: any): error is SummarizerError {
+  return error && error.name === 'SummarizerError' && 'reason' in error;
+}
+
+function getSummarizerErrorMessage(error: SummarizerError): string {
+  switch (error.reason) {
+    case 'unavailable':
+      return ERROR_MESSAGES.SUMMARIZATION_FAILED;
+    case 'model_download':
+      return ERROR_MESSAGES.LOADING;
+    case 'processing_failed':
+      return ERROR_MESSAGES.SUMMARIZATION_FAILED;
+    default:
+      return ERROR_MESSAGES.SUMMARIZATION_FAILED;
   }
 }
