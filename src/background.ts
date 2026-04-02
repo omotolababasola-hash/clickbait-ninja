@@ -12,6 +12,7 @@ import {
   NetworkErrorImpl,
   SummarizerError,
   CacheEntry,
+  ErrorType,
 } from './types';
 
 declare global {
@@ -223,29 +224,41 @@ async function handleSummarizeUrl(
       return {
         success: false,
         error: ERROR_MESSAGES.TEMPORARY_ERROR,
+        errorType: 'generic' as ErrorType,
         cached: false,
       };
     }
 
     if (error instanceof NetworkErrorImpl) {
+      const message = getNetworkErrorMessage(error);
+      const errorType = getNetworkErrorType(error);
+      console.error('[ClickbaitNinja] Network error:', error.status, error.code, error.message);
       return {
         success: false,
-        error: getNetworkErrorMessage(error),
+        error: message,
+        errorType,
         cached: false,
       };
     }
 
     if (isSummarizerError(error)) {
+      const msg = getSummarizerErrorMessage(error);
+      const errorType: ErrorType = error.reason === 'model_download' ? 'model_download' : 'summarization';
+      console.error('[ClickbaitNinja] Summarizer error:', error.reason, error.message);
       return {
         success: false,
-        error: getSummarizerErrorMessage(error),
+        error: msg,
+        errorType,
+        modelDownloading: error.reason === 'model_download',
         cached: false,
       };
     }
 
+    console.error('[ClickbaitNinja] Unexpected error:', error);
     return {
       success: false,
       error: ERROR_MESSAGES.TEMPORARY_ERROR,
+      errorType: 'generic' as ErrorType,
       cached: false,
     };
   } finally {
@@ -422,6 +435,13 @@ function getNetworkErrorMessage(error: NetworkError): string {
   }
 }
 
+function getNetworkErrorType(error: NetworkError): ErrorType {
+  if (error.code === 'CORS') return 'cors';
+  if (error.code === 'NETWORK') return 'network';
+  if (error.status === 401 || error.status === 403) return 'auth';
+  return 'network';
+}
+
 async function initializeSummarizer(): Promise<AISummarizer> {
   if (summarizerInstance) {
     return summarizerInstance;
@@ -540,7 +560,7 @@ function getSummarizerErrorMessage(error: SummarizerError): string {
     case 'unavailable':
       return ERROR_MESSAGES.SUMMARIZATION_FAILED;
     case 'model_download':
-      return ERROR_MESSAGES.LOADING;
+      return ERROR_MESSAGES.MODEL_DOWNLOADING;
     case 'processing_failed':
       return ERROR_MESSAGES.SUMMARIZATION_FAILED;
     default:

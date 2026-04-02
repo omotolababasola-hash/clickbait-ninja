@@ -133,14 +133,14 @@ This implementation plan breaks down the Clickbait Ninja Chrome extension into d
     - **Property 10: Most Recent Summary Display**
     - **Validates: Requirements 4.4**
 
-- [ ] 7. Implement communication between content script and service worker
-  - [ ] 7.1 Create message passing system
+- [x] 7. Implement communication between content script and service worker
+  - [x] 7.1 Create message passing system
     - Implement chrome.runtime.sendMessage for summary requests
     - Add response handling with success/error states
     - Handle service worker unavailability
     - _Requirements: 2.1, 6.5_
 
-  - [ ] 7.2 Add navigation cleanup
+  - [x] 7.2 Add navigation cleanup
     - Implement beforeunload event handling
     - Cancel pending requests on page navigation
     - Clean up event listeners and tooltips
@@ -150,14 +150,14 @@ This implementation plan breaks down the Clickbait Ninja Chrome extension into d
     - **Property 14: Navigation Cleanup**
     - **Validates: Requirements 5.4**
 
-- [ ] 8. Implement error handling and user feedback
-  - [ ] 8.1 Create error display system
+- [x] 8. Implement error handling and user feedback
+  - [x] 8.1 Create error display system
     - Add error message display in tooltips
     - Implement different error types (network, CORS, auth, etc.)
     - Add error logging for debugging
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-  - [ ] 8.2 Add loading states and user feedback
+  - [x] 8.2 Add loading states and user feedback
     - Implement loading spinner for tooltip
     - Add progress indication for model download
     - Handle long-running operations gracefully

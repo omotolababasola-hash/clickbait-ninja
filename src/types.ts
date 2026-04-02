@@ -8,7 +8,9 @@ export interface SummaryResponse {
   success: boolean;
   summary?: string;
   error?: string;
+  errorType?: ErrorType;
   cached: boolean;
+  modelDownloading?: boolean;
 }
 
 export interface CacheEntry {
@@ -90,7 +92,15 @@ export const ERROR_MESSAGES = {
   AUTH_REQUIRED: 'Content requires authentication',
   TEMPORARY_ERROR: 'Temporary error occurred',
   LOADING: 'Loading summary...',
+  MODEL_DOWNLOADING: 'Downloading AI model...',
 } as const;
+
+export type ErrorType = 'network' | 'cors' | 'auth' | 'summarization' | 'model_download' | 'generic';
+
+export interface ErrorDisplayOptions {
+  type: ErrorType;
+  message: string;
+}
 
 export const DEFAULT_TOOLTIP_CONFIG: TooltipConfig = {
   maxWidth: 300,

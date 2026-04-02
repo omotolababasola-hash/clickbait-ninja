@@ -1,12 +1,12 @@
 import {
   SummaryRequest,
   SummaryResponse,
-  Position,
   MESSAGE_TYPES,
   TIMING_CONSTANTS,
   VALID_URL_PATTERN,
   ERROR_MESSAGES,
   DEFAULT_TOOLTIP_CONFIG,
+  ErrorType,
 } from './types';
 
 let currentTooltip: HTMLElement | null = null;
@@ -79,15 +79,17 @@ function handleLinkHover(link: HTMLAnchorElement, url: string): void {
 
       if (response.success && response.summary) {
         showSummaryTooltip(link, response.summary);
+      } else if (response.modelDownloading) {
+        showLoadingTooltip(link, response.error || ERROR_MESSAGES.MODEL_DOWNLOADING, true);
       } else {
-        showErrorTooltip(link, response.error || ERROR_MESSAGES.TEMPORARY_ERROR);
+        showErrorTooltip(link, response.error || ERROR_MESSAGES.TEMPORARY_ERROR, response.errorType || 'generic');
       }
     })
     .catch(() => {
       if (currentRequestTimestamp !== timestamp) {
         return;
       }
-      showErrorTooltip(link, ERROR_MESSAGES.TEMPORARY_ERROR);
+      showErrorTooltip(link, ERROR_MESSAGES.TEMPORARY_ERROR, 'generic');
     });
 }
 
@@ -195,13 +197,42 @@ function positionTooltip(tooltip: HTMLElement, link: HTMLAnchorElement): void {
   tooltip.style.top = `${y}px`;
 }
 
-function showLoadingTooltip(link: HTMLAnchorElement): void {
+function createSpinner(): HTMLElement {
+  const spinner = document.createElement('span');
+  spinner.style.display = 'inline-block';
+  spinner.style.width = '12px';
+  spinner.style.height = '12px';
+  spinner.style.border = '2px solid #cccccc';
+  spinner.style.borderTopColor = '#666666';
+  spinner.style.borderRadius = '50%';
+  spinner.style.marginRight = '8px';
+  spinner.style.verticalAlign = 'middle';
+  spinner.style.animation = 'clickbait-ninja-spin 0.8s linear infinite';
+  return spinner;
+}
+
+function ensureSpinnerAnimation(): void {
+  if (document.getElementById('clickbait-ninja-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'clickbait-ninja-styles';
+  style.textContent = '@keyframes clickbait-ninja-spin { to { transform: rotate(360deg); } }';
+  document.head.appendChild(style);
+}
+
+function showLoadingTooltip(link: HTMLAnchorElement, message: string = ERROR_MESSAGES.LOADING, isModelDownload = false): void {
   hideTooltip();
+  ensureSpinnerAnimation();
 
   const tooltip = createTooltip();
-  tooltip.textContent = ERROR_MESSAGES.LOADING;
-  tooltip.style.fontStyle = 'italic';
-  tooltip.style.color = '#666666';
+  const spinner = createSpinner();
+  const text = document.createElement('span');
+  text.textContent = message;
+  text.style.verticalAlign = 'middle';
+  text.style.color = isModelDownload ? '#0066cc' : '#666666';
+  text.style.fontStyle = 'italic';
+
+  tooltip.appendChild(spinner);
+  tooltip.appendChild(text);
 
   document.body.appendChild(tooltip);
   positionTooltip(tooltip, link);
@@ -223,7 +254,18 @@ function showSummaryTooltip(link: HTMLAnchorElement, summary: string): void {
   positionTooltip(currentTooltip, link);
 }
 
-function showErrorTooltip(link: HTMLAnchorElement, error: string): void {
+function getErrorColor(type: ErrorType): string {
+  switch (type) {
+    case 'network': return '#cc6600';
+    case 'cors': return '#cc6600';
+    case 'auth': return '#cc0000';
+    case 'summarization': return '#666666';
+    case 'model_download': return '#0066cc';
+    default: return '#cc0000';
+  }
+}
+
+function showErrorTooltip(link: HTMLAnchorElement, error: string, type: ErrorType = 'generic'): void {
   if (!currentTooltip) {
     const tooltip = createTooltip();
     document.body.appendChild(tooltip);
@@ -232,7 +274,7 @@ function showErrorTooltip(link: HTMLAnchorElement, error: string): void {
 
   currentTooltip.textContent = error;
   currentTooltip.style.fontStyle = 'italic';
-  currentTooltip.style.color = '#cc0000';
+  currentTooltip.style.color = getErrorColor(type);
 
   positionTooltip(currentTooltip, link);
 }
